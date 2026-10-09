@@ -1,0 +1,30 @@
+name: Label PR
+
+on:
+  pull_request:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label from branch prefix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          prefix="${BRANCH%%/*}"
+          case "$prefix" in
+            feature|bugfix|chore|hotfix)
+              gh api -X POST "repos/${REPO}/issues/${PR_NUMBER}/labels" -f "labels[]=${prefix}" --silent
+              echo "Labelled PR #${PR_NUMBER} as ${prefix}"
+              ;;
+            *)
+              echo "No label for branch prefix: ${prefix}"
+              ;;
+          esac
