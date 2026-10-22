@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using Spectre.Console;
+using Spectre.Console.Rendering;
 
 namespace Starter.Init;
 
@@ -68,12 +69,22 @@ internal static class Program
         }
 
         var solution = Path.Combine(outputDir, $"{name}.sln");
+
+        // Test reports go to a temporary folder, so the generated project stays clean.
+        var testResults = Path.Combine(Path.GetTempPath(), "starter-init", Guid.NewGuid().ToString("N"));
+
         Step[] steps =
         [
             new("Génération du projet", "Projet généré",
                 ["new", template.ShortName, "--name", name, "--output", outputDir, .. (replaceGitignore ? ["--force"] : Array.Empty<string>())]),
             new("Restauration des paquets", "Paquets restaurés", ["restore", solution]),
+            new("Lecture des paquets", "Paquets installés",
+                ["list", solution, "package", "--format", "json"],
+                result => PackageReport.Build(result.StandardOutput)),
             new("Compilation de la solution", "Solution compilée", ["build", solution, "--no-restore"]),
+            new("Exécution des tests", "Tests réussis",
+                ["test", solution, "--no-build", "--logger", "trx", "--results-directory", testResults],
+                _ => TestReport.Build(testResults)),
         ];
 
         // Keeping the existing .gitignore: move it aside while generating, then put it back.
@@ -94,6 +105,11 @@ internal static class Program
             {
                 File.Move(gitignoreBackup, gitignore, overwrite: true);
             }
+
+            if (Directory.Exists(testResults))
+            {
+                Directory.Delete(testResults, recursive: true);
+            }
         }
 
         if (!succeeded)
@@ -105,7 +121,12 @@ internal static class Program
         return 0;
     }
 
-    private sealed record Step(string Running, string Done, string[] Arguments);
+    // Details, when set, renders extra output (a table) after the step succeeds.
+    private sealed record Step(
+        string Running,
+        string Done,
+        string[] Arguments,
+        Func<DotNetCli.Result, IRenderable>? Details = null);
 
     // Runs each step under a spinner and prints a line as each one completes.
     private static Task<bool> RunStepsAsync(IReadOnlyList<Step> steps) =>
@@ -124,14 +145,38 @@ internal static class Program
                     {
                         AnsiConsole.MarkupLine($"[red]✘[/] {step.Running} [red]a échoué[/]");
                         AnsiConsole.WriteLine(result.Output);
+                        WriteDetails(step, result, quiet: true);
                         return false;
                     }
 
                     AnsiConsole.MarkupLine($"[green]✔[/] {step.Done} [grey]({stopwatch.Elapsed.TotalSeconds:0.0} s)[/]");
+                    WriteDetails(step, result);
                 }
 
                 return true;
             });
+
+    // quiet: on a failed step, skip the "unavailable" note (the dotnet output already explains).
+    private static void WriteDetails(Step step, DotNetCli.Result result, bool quiet = false)
+    {
+        if (step.Details is null)
+        {
+            return;
+        }
+
+        try
+        {
+            AnsiConsole.Write(step.Details(result));
+        }
+        catch (Exception exception)
+        {
+            // A report is a bonus: never fail the generation because it couldn't be read.
+            if (!quiet)
+            {
+                AnsiConsole.MarkupLine($"[grey]Détails indisponibles : {Markup.Escape(exception.Message)}[/]");
+            }
+        }
+    }
 
     private static void ShowHeader()
     {
@@ -236,9 +281,10 @@ internal static class Program
         tests.AddNode($"{name}.Api.IntegrationTests");
         AnsiConsole.Write(tree);
 
+        var run = $"dotnet run --project {Path.Combine("src", $"{name}.Api")}";
         var nextStep = outputDir == Directory.GetCurrentDirectory()
-            ? "dotnet test"
-            : $"cd \"{outputDir}\" puis dotnet test";
+            ? run
+            : $"cd \"{outputDir}\" puis {run}";
         AnsiConsole.MarkupLine($"Étape suivante : [#8B9BFA]{Markup.Escape(nextStep)}[/]");
     }
 
