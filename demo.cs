@@ -3,7 +3,6 @@ using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
 using Spectre.Console;
-using Spectre.Console.Rendering;
 
 namespace Starter.Init;
 
@@ -69,28 +68,13 @@ internal static class Program
         }
 
         var solution = Path.Combine(outputDir, $"{name}.sln");
-
-        // Test reports go to a temporary folder, so the generated project stays clean.
-        var testResults = Path.Combine(Path.GetTempPath(), "starter-init", Guid.NewGuid().ToString("N"));
-
         Step[] steps =
         [
             new("Génération du projet", "Projet généré",
                 ["new", template.ShortName, "--name", name, "--output", outputDir, .. (replaceGitignore ? ["--force"] : Array.Empty<string>())]),
             new("Restauration des paquets", "Paquets restaurés", ["restore", solution]),
-            new("Lecture des paquets", "Paquets installés",
-                ["list", solution, "package", "--format", "json"],
-                result => PackageReport.Build(result.StandardOutput)),
             new("Compilation de la solution", "Solution compilée", ["build", solution, "--no-restore"]),
-            // TRX for both runners: "--logger trx" for VSTest projects, the MSBuild property for
-            // Microsoft Testing Platform projects. Each runner ignores the other's option.
-            new("Exécution des tests", "Tests réussis",
-                [
-                    "test", solution, "--no-build",
-                    "--logger", "trx", "--results-directory", testResults,
-                    $"-p:TestingPlatformCommandLineArguments=--report-trx --results-directory \"{testResults}\"",
-                ],
-                _ => TestReport.Build(testResults)),
+            new("Exécution des tests", "Tests réussis", ["test", solution, "--no-build"]),
         ];
 
         // Keeping the existing .gitignore: move it aside while generating, then put it back.
@@ -111,11 +95,6 @@ internal static class Program
             {
                 File.Move(gitignoreBackup, gitignore, overwrite: true);
             }
-
-            if (Directory.Exists(testResults))
-            {
-                Directory.Delete(testResults, recursive: true);
-            }
         }
 
         if (!succeeded)
@@ -127,61 +106,63 @@ internal static class Program
         return 0;
     }
 
-    // Details, when set, renders extra output (a table) after the step succeeds.
-    private sealed record Step(
-        string Running,
-        string Done,
-        string[] Arguments,
-        Func<DotNetCli.Result, IRenderable>? Details = null);
+    private sealed record Step(string Running, string Done, string[] Arguments);
 
-    // Runs each step under a spinner and prints a line as each one completes.
-    private static Task<bool> RunStepsAsync(IReadOnlyList<Step> steps) =>
-        AnsiConsole.Status()
-            .Spinner(Spinner.Known.Dots)
-            .SpinnerStyle(new Style(Color.MediumPurple))
-            .StartAsync(steps[0].Running, async context =>
+    // Shows every step up front, then runs them one by one: ○ pending, spinner running, ✔ done, ✘ failed.
+    private static async Task<bool> RunStepsAsync(IReadOnlyList<Step> steps)
+    {
+        var status = new StepStatusColumn();
+        var finalLines = new List<string>();
+        DotNetCli.Result? failure = null;
+
+        await AnsiConsole.Progress()
+            .AutoClear(false)
+            .Columns(status, new TaskDescriptionColumn { Alignment = Justify.Left })
+            .StartAsync(async context =>
             {
-                foreach (var step in steps)
+                var tasks = steps
+                    .Select(step => context.AddTask($"[grey]{step.Running}[/]", autoStart: false).IsIndeterminate())
+                    .ToList();
+
+                for (var i = 0; i < steps.Count; i++)
                 {
-                    context.Status($"{step.Running}...");
+                    var (step, task) = (steps[i], tasks[i]);
+                    task.Description = $"{step.Running}...";
+                    task.StartTask();
                     var stopwatch = Stopwatch.StartNew();
 
                     var result = await DotNetCli.RunAsync(step.Arguments);
                     if (result.ExitCode != 0)
                     {
-                        AnsiConsole.MarkupLine($"[red]✘[/] {step.Running} [red]a échoué[/]");
-                        AnsiConsole.WriteLine(result.Output);
-                        WriteDetails(step, result, quiet: true);
-                        return false;
+                        status.MarkFailed(task);
+                        task.Description = $"[red]{step.Running} a échoué[/]";
+                        task.StopTask();
+                        finalLines.Add($"[red]✘[/] {task.Description}");
+                        failure = result;
+                        return;
                     }
 
-                    AnsiConsole.MarkupLine($"[green]✔[/] {step.Done} [grey]({stopwatch.Elapsed.TotalSeconds:0.0} s)[/]");
-                    WriteDetails(step, result);
+                    task.Description = $"{step.Done} [grey]({stopwatch.Elapsed.TotalSeconds:0.0} s)[/]";
+                    task.IsIndeterminate(false).Value(task.MaxValue);
+                    task.StopTask();
+                    finalLines.Add($"[green]✔[/] {task.Description}");
                 }
-
-                return true;
             });
 
-    // quiet: on a failed step, skip the "unavailable" note (the dotnet output already explains).
-    private static void WriteDetails(Step step, DotNetCli.Result result, bool quiet = false)
-    {
-        if (step.Details is null)
+        // Without a real terminal (script, redirected output), Spectre draws nothing: print the outcome instead.
+        if (!AnsiConsole.Profile.Capabilities.Interactive)
         {
-            return;
+            finalLines.ForEach(AnsiConsole.MarkupLine);
         }
 
-        try
+        // The dotnet output is printed after the live display, so it doesn't fight with the redraws.
+        if (failure is not null)
         {
-            AnsiConsole.Write(step.Details(result));
+            AnsiConsole.WriteLine(failure.Output);
+            return false;
         }
-        catch (Exception exception)
-        {
-            // A report is a bonus: never fail the generation because it couldn't be read.
-            if (!quiet)
-            {
-                AnsiConsole.MarkupLine($"[grey]Détails indisponibles : {Markup.Escape(exception.Message)}[/]");
-            }
-        }
+
+        return true;
     }
 
     private static void ShowHeader()
