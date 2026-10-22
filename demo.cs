@@ -82,8 +82,14 @@ internal static class Program
                 ["list", solution, "package", "--format", "json"],
                 result => PackageReport.Build(result.StandardOutput)),
             new("Compilation de la solution", "Solution compilée", ["build", solution, "--no-restore"]),
+            // TRX for both runners: "--logger trx" for VSTest projects, the MSBuild property for
+            // Microsoft Testing Platform projects. Each runner ignores the other's option.
             new("Exécution des tests", "Tests réussis",
-                ["test", solution, "--no-build", "--logger", "trx", "--results-directory", testResults],
+                [
+                    "test", solution, "--no-build",
+                    "--logger", "trx", "--results-directory", testResults,
+                    $"-p:TestingPlatformCommandLineArguments=--report-trx --results-directory \"{testResults}\"",
+                ],
                 _ => TestReport.Build(testResults)),
         ];
 
