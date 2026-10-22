@@ -6,7 +6,7 @@ using Spectre.Console;
 
 namespace Starter.Init;
 
-internal static partial class Program
+internal static class Program
 {
     public static async Task<int> Main(string[] args)
     {
@@ -15,10 +15,9 @@ internal static partial class Program
 
         ShowHeader();
 
-        // A name passed as argument skips every prompt (for scripts) and uses the first template.
+        // Arguments skip every prompt (for scripts): starter-init <name> [folder]. The first template is used.
         var interactive = args.Length == 0;
         var name = interactive ? PromptName() : args[0];
-        var template = interactive ? PromptTemplate() : Templates.All[0];
 
         if (!ValidName().IsMatch(name))
         {
@@ -26,7 +25,17 @@ internal static partial class Program
             return 1;
         }
 
-        var outputDir = Directory.GetCurrentDirectory();
+        var template = interactive ? PromptTemplate() : Templates.All[0];
+        var outputDir = interactive
+            ? PromptOutputDir(name)
+            : args.Length > 1 ? ToFullPath(args[1]) : DefaultOutputDir(name);
+
+        if (outputDir is null)
+        {
+            AnsiConsole.MarkupLine($"[red]'{Markup.Escape(args[1])}' n'est pas un chemin valide.[/]");
+            return 1;
+        }
+
         if (Directory.Exists(Path.Combine(outputDir, "src", $"{name}.Api")))
         {
             AnsiConsole.MarkupLine($"[red]src/{name}.Api existe déjà dans {Markup.Escape(outputDir)}.[/]");
@@ -40,6 +49,18 @@ internal static partial class Program
             return 1;
         }
 
+        if (interactive && !IsEmptyFolder(outputDir)
+            && !await ConfirmAsync("Le dossier n'est pas vide. Générer quand même ?"))
+        {
+            return 0;
+        }
+
+        // dotnet new refuses to overwrite files, and a freshly cloned repo often has its own .gitignore.
+        var gitignore = Path.Combine(outputDir, ".gitignore");
+        var keepGitignore = File.Exists(gitignore)
+            && (!interactive || !await ConfirmAsync("Un .gitignore existe déjà. Le remplacer par celui du modèle ?"));
+        var replaceGitignore = File.Exists(gitignore) && !keepGitignore;
+
         ShowSummary(name, template, outputDir);
         if (interactive && !await ConfirmAsync("Générer le projet ?"))
         {
@@ -49,12 +70,33 @@ internal static partial class Program
         var solution = Path.Combine(outputDir, $"{name}.sln");
         Step[] steps =
         [
-            new("Génération du projet", "Projet généré", ["new", template.ShortName, "--name", name, "--output", outputDir]),
+            new("Génération du projet", "Projet généré",
+                ["new", template.ShortName, "--name", name, "--output", outputDir, .. (replaceGitignore ? ["--force"] : Array.Empty<string>())]),
             new("Restauration des paquets", "Paquets restaurés", ["restore", solution]),
             new("Compilation de la solution", "Solution compilée", ["build", solution, "--no-restore"]),
         ];
 
-        if (!await RunStepsAsync(steps))
+        // Keeping the existing .gitignore: move it aside while generating, then put it back.
+        var gitignoreBackup = gitignore + ".starter-init.bak";
+        if (keepGitignore)
+        {
+            File.Move(gitignore, gitignoreBackup);
+        }
+
+        bool succeeded;
+        try
+        {
+            succeeded = await RunStepsAsync(steps);
+        }
+        finally
+        {
+            if (keepGitignore)
+            {
+                File.Move(gitignoreBackup, gitignore, overwrite: true);
+            }
+        }
+
+        if (!succeeded)
         {
             return 1;
         }
@@ -121,6 +163,45 @@ internal static partial class Program
             InvalidChoiceMessage = "[red]Répondez o (oui) ou n (non)[/]",
         });
 
+    private static string PromptOutputDir(string name) =>
+        ToFullPath(AnsiConsole.Prompt(
+            new TextPrompt<string>("[#8B9BFA]Dossier[/] de destination :")
+                .DefaultValue(DefaultOutputDir(name))
+                .Validate(path => ToFullPath(path) is null
+                    ? ValidationResult.Error("[red]Chemin invalide[/]")
+                    : ValidationResult.Success())))!;
+
+    // The current folder when it's empty (e.g. a freshly cloned repo), otherwise a new <name> subfolder.
+    private static string DefaultOutputDir(string name)
+    {
+        var current = Directory.GetCurrentDirectory();
+        return IsEmptyFolder(current) ? current : Path.Combine(current, name);
+    }
+
+    // Relative paths are resolved from the current folder; returns null for an invalid path or an existing file.
+    private static string? ToFullPath(string path)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(path.Trim().Trim('"'), Directory.GetCurrentDirectory());
+            return File.Exists(fullPath) ? null : fullPath;
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+    }
+
+    // A folder counts as empty when it doesn't exist or only holds repo files (.git, .gitignore, README, LICENSE).
+    private static bool IsEmptyFolder(string path) =>
+        !Directory.Exists(path)
+        || Directory.EnumerateFileSystemEntries(path)
+            .Select(Path.GetFileName)
+            .All(entry => entry is not null
+                && (entry.StartsWith('.')
+                    || entry.StartsWith("README", StringComparison.OrdinalIgnoreCase)
+                    || entry.StartsWith("LICENSE", StringComparison.OrdinalIgnoreCase)));
+
     private static Templates.Choice PromptTemplate()
     {
         var template = AnsiConsole.Prompt(
@@ -155,9 +236,14 @@ internal static partial class Program
         tests.AddNode($"{name}.Api.IntegrationTests");
         AnsiConsole.Write(tree);
 
-        AnsiConsole.MarkupLine("Étape suivante : [#8B9BFA]dotnet test[/]");
+        var nextStep = outputDir == Directory.GetCurrentDirectory()
+            ? "dotnet test"
+            : $"cd \"{outputDir}\" puis dotnet test";
+        AnsiConsole.MarkupLine($"Étape suivante : [#8B9BFA]{Markup.Escape(nextStep)}[/]");
     }
 
-    [GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")]
-    private static partial Regex ValidName();
+    private static readonly Regex ValidNamePattern =
+        new(@"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$", RegexOptions.Compiled);
+
+    private static Regex ValidName() => ValidNamePattern;
 }
