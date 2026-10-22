@@ -1,0 +1,49 @@
+using System.Xml.Linq;
+using Spectre.Console;
+using Spectre.Console.Rendering;
+
+namespace Starter.Init;
+
+// Renders the .trx files written by "dotnet test --logger trx" as a table, one row per test project.
+internal static class TestReport
+{
+    private static readonly XNamespace Trx = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
+
+    public static IRenderable Build(string resultsDirectory)
+    {
+        var table = new Table()
+            .Border(TableBorder.Rounded)
+            .BorderColor(Color.Grey30)
+            .AddColumn("Projet de tests")
+            .AddColumn(new TableColumn("Réussis").RightAligned())
+            .AddColumn(new TableColumn("Échecs").RightAligned())
+            .AddColumn(new TableColumn("Ignorés").RightAligned())
+            .AddColumn(new TableColumn("Durée").RightAligned());
+
+        foreach (var file in Directory.EnumerateFiles(resultsDirectory, "*.trx").Order())
+        {
+            var run = XDocument.Load(file).Root!;
+            var counters = run.Descendants(Trx + "Counters").First();
+            var times = run.Element(Trx + "Times")!;
+
+            // codeBase keeps the assembly's casing (storage is lowercased).
+            var assembly = run.Descendants(Trx + "TestMethod")
+                .Select(method => (string?)method.Attribute("codeBase"))
+                .FirstOrDefault();
+            var project = assembly is null ? Path.GetFileName(file) : Path.GetFileNameWithoutExtension(assembly);
+
+            var failed = (int?)counters.Attribute("failed") ?? 0;
+            var duration = DateTimeOffset.Parse((string)times.Attribute("finish")!)
+                - DateTimeOffset.Parse((string)times.Attribute("start")!);
+
+            table.AddRow(
+                Markup.Escape(project),
+                $"[green]{(int?)counters.Attribute("passed") ?? 0}[/]",
+                failed == 0 ? "0" : $"[red]{failed}[/]",
+                $"{(int?)counters.Attribute("notExecuted") ?? 0}",
+                $"[grey]{duration.TotalSeconds:0.0} s[/]");
+        }
+
+        return table;
+    }
+}
