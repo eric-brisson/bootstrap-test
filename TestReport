@@ -11,6 +11,15 @@ internal static class TestReport
 
     public static IRenderable Build(string resultsDirectory)
     {
+        var files = Directory.Exists(resultsDirectory)
+            ? Directory.EnumerateFiles(resultsDirectory, "*.trx", SearchOption.AllDirectories).Order().ToList()
+            : [];
+
+        if (files.Count == 0)
+        {
+            return new Markup("[grey]Aucun rapport de tests (.trx) trouvé.[/]\n");
+        }
+
         var table = new Table()
             .Border(TableBorder.Rounded)
             .BorderColor(Color.Grey30)
@@ -20,7 +29,7 @@ internal static class TestReport
             .AddColumn(new TableColumn("Ignorés").RightAligned())
             .AddColumn(new TableColumn("Durée").RightAligned());
 
-        foreach (var file in Directory.EnumerateFiles(resultsDirectory, "*.trx").Order())
+        foreach (var file in files)
         {
             var run = XDocument.Load(file).Root!;
             var counters = run.Descendants(Trx + "Counters").First();
