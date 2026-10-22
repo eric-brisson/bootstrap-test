@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -17,6 +16,9 @@ internal static class Program
 
         // Arguments skip every prompt (for scripts): starter-init <name> [folder]. The first template is used.
         var interactive = args.Length == 0;
+
+        // The template comes first: later questions can depend on the project type.
+        var template = interactive ? PromptTemplate() : Templates.All[0];
         var name = interactive ? PromptName() : args[0];
 
         if (!ValidName().IsMatch(name))
@@ -25,7 +27,6 @@ internal static class Program
             return 1;
         }
 
-        var template = interactive ? PromptTemplate() : Templates.All[0];
         var outputDir = interactive
             ? PromptOutputDir(name)
             : args.Length > 1 ? ToFullPath(args[1]) : DefaultOutputDir(name);
@@ -70,11 +71,11 @@ internal static class Program
         var solution = Path.Combine(outputDir, $"{name}.sln");
         Step[] steps =
         [
-            new("Génération du projet", "Projet généré",
+            new("Génération du projet", "Projet généré", Color.FromHex("#8B9BFA"),
                 ["new", template.ShortName, "--name", name, "--output", outputDir, .. (replaceGitignore ? ["--force"] : Array.Empty<string>())]),
-            new("Restauration des paquets", "Paquets restaurés", ["restore", solution]),
-            new("Compilation de la solution", "Solution compilée", ["build", solution, "--no-restore"]),
-            new("Exécution des tests", "Tests réussis", ["test", solution, "--no-build"]),
+            new("Restauration des paquets", "Paquets restaurés", Color.FromHex("#98C379"), ["restore", solution]),
+            new("Compilation de la solution", "Solution compilée", Color.FromHex("#61AFEF"), ["build", solution, "--no-restore"]),
+            new("Exécution des tests", "Tests réussis", Color.FromHex("#E5C07B"), ["test", solution, "--no-build"]),
         ];
 
         // Keeping the existing .gitignore: move it aside while generating, then put it back.
@@ -106,46 +107,50 @@ internal static class Program
         return 0;
     }
 
-    private sealed record Step(string Running, string Done, string[] Arguments);
+    private sealed record Step(string Running, string Done, Color Color, string[] Arguments);
 
-    // Shows every step up front, then runs them one by one: ○ pending, spinner running, ✔ done, ✘ failed.
+    // Shows every step up front, then runs them one by one, each in its own color.
     private static async Task<bool> RunStepsAsync(IReadOnlyList<Step> steps)
     {
-        var status = new StepStatusColumn();
+        var display = new StepDisplay();
         var finalLines = new List<string>();
         DotNetCli.Result? failure = null;
 
+        // Pad labels to the longest one so the durations stay in place when a label changes.
+        // The padding sits inside the color tag, because Spectre trims the description.
+        var labelWidth = steps.Max(step => Math.Max(step.Done.Length, $"{step.Running} a échoué".Length));
+        string Label(string text, string color) => $"[{color}]{text.PadRight(labelWidth)}[/]";
+
         await AnsiConsole.Progress()
             .AutoClear(false)
-            .Columns(status, new TaskDescriptionColumn { Alignment = Justify.Left })
+            .Columns(display.Columns)
             .StartAsync(async context =>
             {
                 var tasks = steps
-                    .Select(step => context.AddTask($"[grey]{step.Running}[/]", autoStart: false).IsIndeterminate())
+                    .Select(step => context.AddTask(Label(step.Running, "grey"), autoStart: false))
                     .ToList();
 
                 for (var i = 0; i < steps.Count; i++)
                 {
                     var (step, task) = (steps[i], tasks[i]);
-                    task.Description = $"{step.Running}...";
+                    var color = step.Color.ToMarkup();
+                    task.Description = Label(step.Running, color);
                     task.StartTask();
-                    var stopwatch = Stopwatch.StartNew();
 
                     var result = await DotNetCli.RunAsync(step.Arguments);
                     if (result.ExitCode != 0)
                     {
-                        status.MarkFailed(task);
-                        task.Description = $"[red]{step.Running} a échoué[/]";
+                        display.MarkFailed(task);
+                        task.Description = Label($"{step.Running} a échoué", "red");
                         task.StopTask();
-                        finalLines.Add($"[red]✘[/] {task.Description}");
+                        finalLines.Add($"[red]✘ {step.Running} a échoué[/]");
                         failure = result;
                         return;
                     }
 
-                    task.Description = $"{step.Done} [grey]({stopwatch.Elapsed.TotalSeconds:0.0} s)[/]";
-                    task.IsIndeterminate(false).Value(task.MaxValue);
+                    task.Description = Label(step.Done, color);
                     task.StopTask();
-                    finalLines.Add($"[green]✔[/] {task.Description}");
+                    finalLines.Add($"[green]✔[/] [{color}]{step.Done}[/] [grey]({task.ElapsedTime?.TotalSeconds:0.0} s)[/]");
                 }
             });
 
@@ -175,7 +180,7 @@ internal static class Program
         AnsiConsole.MarkupLine($"[grey]Outil de création de projets · v{version}[/]");
         AnsiConsole.Write(new Rule().RuleStyle("grey"));
         AnsiConsole.MarkupLine("[bold]Créer un nouveau projet[/]");
-        AnsiConsole.MarkupLine("[grey]Choisissez un nom et un modèle pour commencer.[/]");
+        AnsiConsole.MarkupLine("[grey]Choisissez un modèle et un nom pour commencer.[/]");
         AnsiConsole.WriteLine();
     }
 
